@@ -143,13 +143,25 @@ with col3:
 
 # Opções avançadas
 st.markdown("### ⚙️ Configurações Avançadas")
+
+# Modo de velocidade
+modo_velocidade = st.radio(
+    "⚡ Modo de Treinamento",
+    options=["🚀 Rápido (Cloud)", "⚖️ Balanceado", "🎯 Completo (Local)"],
+    horizontal=True,
+    index=0,
+    help="Rápido: ideal para Streamlit Cloud. Completo: para máquinas locais potentes."
+)
+
 col_adv1, col_adv2 = st.columns(2)
 
 with col_adv1:
+    # Walk-forward desativado por padrão no modo rápido
+    default_wf = modo_velocidade != "🚀 Rápido (Cloud)"
     validacao_walk_forward = st.checkbox(
         "🔄 Validação Walk-Forward",
-        value=True,
-        help="Usa validação mais realista que simula previsões sequenciais. Mais lento, mas evita overfitting."
+        value=default_wf,
+        help="Usa validação mais realista. Desative para treinar mais rápido."
     )
 
 with col_adv2:
@@ -205,8 +217,15 @@ else:
     n_modelos_ensemble = 3
     metodo_ensemble = "Média Ponderada por Score"
 
-# Seleção de modelos
+# Seleção de modelos - defaults baseados no modo de velocidade
 st.markdown("### 🎯 Selecione os Modelos")
+
+# Defaults rápidos para Cloud
+modo_rapido = modo_velocidade == "🚀 Rápido (Cloud)"
+modo_completo = modo_velocidade == "🎯 Completo (Local)"
+
+if modo_rapido:
+    st.caption("💡 *Modo Rápido: modelos mais leves selecionados por padrão*")
 
 col1, col2, col3 = st.columns(3)
 
@@ -214,24 +233,24 @@ with col1:
     st.markdown("**Modelos de ML**")
     use_xgboost = st.checkbox("XGBoost", value=True)
     use_lightgbm = st.checkbox("LightGBM", value=True)
-    use_catboost = st.checkbox("CatBoost", value=False)
-    use_rf = st.checkbox("Random Forest", value=True)
+    use_catboost = st.checkbox("CatBoost", value=not modo_rapido, help="Lento no Cloud")
+    use_rf = st.checkbox("Random Forest", value=not modo_rapido)
     use_gb = st.checkbox("Gradient Boosting", value=False)
 
 with col2:
     st.markdown("**Redes Neurais / Regressão**")
     use_mlp = st.checkbox("MLP Regressor", value=False)
-    use_ridge = st.checkbox("Ridge Regression", value=False)
+    use_ridge = st.checkbox("Ridge Regression", value=modo_rapido, help="Rápido e eficiente")
     use_svr = st.checkbox("SVR (Support Vector)", value=False)
     use_elasticnet = st.checkbox("ElasticNet", value=False)
     use_knn = st.checkbox("KNN Regressor", value=False)
 
 with col3:
     st.markdown("**Modelos Estatísticos**")
-    use_prophet = st.checkbox("Prophet", value=True)
+    use_prophet = st.checkbox("Prophet", value=not modo_rapido, help="Muito lento no Cloud (~3-5min)")
     use_arima = st.checkbox("ARIMA", value=False)
     use_sarima = st.checkbox("SARIMA", value=False)
-    use_hw = st.checkbox("Holt-Winters", value=False)
+    use_hw = st.checkbox("Holt-Winters", value=modo_rapido, help="Alternativa rápida ao Prophet")
 
 # ========== FUNÇÕES AUXILIARES ==========
 
@@ -673,8 +692,12 @@ def walk_forward_validation(model, X, y, n_splits=5, test_size=None):
     
     return np.array(all_trues), np.array(all_preds)
 
-def treinar_modelos(df_turno, turno_nome, modelos_selecionados, train_size, usar_walk_forward=True):
-    """Treinar modelos para um turno específico ou agregado"""
+def treinar_modelos(df_turno, turno_nome, modelos_selecionados, train_size, usar_walk_forward=True, modo_rapido=False):
+    """Treinar modelos para um turno específico ou agregado
+    
+    Args:
+        modo_rapido: Se True, usa menos hiperparâmetros e menos CV splits para treinar mais rápido
+    """
     from sklearn.preprocessing import RobustScaler
     from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
     
@@ -776,9 +799,12 @@ def treinar_modelos(df_turno, turno_nome, modelos_selecionados, train_size, usar
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
-    # TimeSeriesSplit para cross-validation
-    n_splits = min(5, len(X_train) // 10) if len(X_train) >= 50 else min(3, len(X_train) // 5)
-    n_splits = max(2, n_splits)
+    # TimeSeriesSplit para cross-validation (menos splits no modo rápido)
+    if modo_rapido:
+        n_splits = 2  # Mínimo para validação cruzada
+    else:
+        n_splits = min(5, len(X_train) // 10) if len(X_train) >= 50 else min(3, len(X_train) // 5)
+        n_splits = max(2, n_splits)
     tscv = TimeSeriesSplit(n_splits=n_splits)
     
     # Treinar cada modelo
@@ -787,14 +813,24 @@ def treinar_modelos(df_turno, turno_nome, modelos_selecionados, train_size, usar
             if modelo_nome == 'XGBoost':
                 from xgboost import XGBRegressor
                 
-                # Parâmetros otimizados e mais conservadores
-                if len(X_train) >= 50:
-                    # GridSearch simplificado para ser mais rápido
+                # Parâmetros otimizados - modo rápido usa menos combinações
+                if modo_rapido:
+                    # Modo rápido: sem GridSearch, parâmetros fixos otimizados
+                    reg_lambda = 20 if alta_volatilidade else 5
+                    model = XGBRegressor(
+                        n_estimators=50, max_depth=3, learning_rate=0.1,
+                        subsample=0.8, colsample_bytree=0.8, 
+                        reg_lambda=reg_lambda,
+                        random_state=42, verbosity=0
+                    )
+                    model.fit(X_train_scaled, y_train)
+                elif len(X_train) >= 50:
+                    # GridSearch simplificado
                     param_grid = {
                         'n_estimators': [50, 100],
                         'max_depth': [3, 5],
                         'learning_rate': [0.05, 0.1],
-                        'reg_lambda': [1, 10] if not alta_volatilidade else [10, 50, 100]
+                        'reg_lambda': [1, 10] if not alta_volatilidade else [10, 50]
                     }
                     
                     base_model = XGBRegressor(
@@ -827,7 +863,7 @@ def treinar_modelos(df_turno, turno_nome, modelos_selecionados, train_size, usar
                 # Calcular métricas usando walk-forward se ativado
                 if usar_walk_forward and len(X_train_scaled) >= 20:
                     y_true_wf, y_pred_wf = walk_forward_validation(
-                        model, X_train_scaled, y_train, n_splits=min(5, len(X_train)//10)
+                        model, X_train_scaled, y_train, n_splits=min(3 if modo_rapido else 5, len(X_train)//10)
                     )
                     if y_true_wf is not None:
                         if apply_log:
@@ -869,12 +905,22 @@ def treinar_modelos(df_turno, turno_nome, modelos_selecionados, train_size, usar
             elif modelo_nome == 'LightGBM':
                 from lightgbm import LGBMRegressor
                 
-                if len(X_train) >= 50:
+                if modo_rapido:
+                    # Modo rápido: sem GridSearch
+                    reg_lambda = 20 if alta_volatilidade else 5
+                    model = LGBMRegressor(
+                        n_estimators=50, max_depth=3, learning_rate=0.1,
+                        subsample=0.8, colsample_bytree=0.8, 
+                        reg_lambda=reg_lambda,
+                        random_state=42, verbosity=-1
+                    )
+                    model.fit(X_train_scaled, y_train)
+                elif len(X_train) >= 50:
                     param_grid = {
                         'n_estimators': [50, 100],
-                        'max_depth': [3, 4] if alta_volatilidade else [3, 5],
-                        'learning_rate': [0.03, 0.05] if alta_volatilidade else [0.05, 0.1],
-                        'reg_lambda': [10, 50, 100] if alta_volatilidade else [1, 10]
+                        'max_depth': [3, 5],
+                        'learning_rate': [0.05, 0.1],
+                        'reg_lambda': [10, 50] if alta_volatilidade else [1, 10]
                     }
                     
                     base_model = LGBMRegressor(
@@ -907,7 +953,7 @@ def treinar_modelos(df_turno, turno_nome, modelos_selecionados, train_size, usar
                 # Walk-forward validation
                 if usar_walk_forward and len(X_train_scaled) >= 20:
                     y_true_wf, y_pred_wf = walk_forward_validation(
-                        model, X_train_scaled, y_train, n_splits=min(5, len(X_train)//10)
+                        model, X_train_scaled, y_train, n_splits=min(3 if modo_rapido else 5, len(X_train)//10)
                     )
                     if y_true_wf is not None:
                         if apply_log:
@@ -1393,6 +1439,12 @@ st.markdown("---")
 
 if st.button("🚀 Iniciar Treinamento", type="primary"):
     
+    # Definir modo rápido baseado na seleção do usuário
+    modo_rapido = modo_velocidade == "🚀 Rápido (Cloud)"
+    
+    if modo_rapido:
+        st.info("⚡ **Modo Rápido ativado**: Treinamento otimizado para Streamlit Cloud")
+    
     if len(df) < 30:
         st.error("❌ Dados insuficientes. Mínimo de 30 registros necessários.")
         st.stop()
@@ -1474,7 +1526,7 @@ if st.button("🚀 Iniciar Treinamento", type="primary"):
                 progress_bar.progress((i + 1) / len(grupos))
                 continue
             
-            resultados, erro = treinar_modelos(df_grupo, grupo_nome, modelos_selecionados, train_size, validacao_walk_forward)
+            resultados, erro = treinar_modelos(df_grupo, grupo_nome, modelos_selecionados, train_size, validacao_walk_forward, modo_rapido)
             
             if erro:
                 pass  # Silencioso para muitos grupos
@@ -1558,7 +1610,7 @@ if st.button("🚀 Iniciar Treinamento", type="primary"):
             st.markdown(f"**Turno: {turno}**")
             df_turno = df[df['Turno'] == turno].copy()
             
-            resultados, erro = treinar_modelos(df_turno, turno, modelos_selecionados, train_size, validacao_walk_forward)
+            resultados, erro = treinar_modelos(df_turno, turno, modelos_selecionados, train_size, validacao_walk_forward, modo_rapido)
             
             if erro:
                 st.warning(erro)
@@ -1615,7 +1667,7 @@ if st.button("🚀 Iniciar Treinamento", type="primary"):
     else:
         st.markdown("### 📊 Treinando modelos (agregado)...")
         
-        resultados, erro = treinar_modelos(df, 'Agregado', modelos_selecionados, train_size, validacao_walk_forward)
+        resultados, erro = treinar_modelos(df, 'Agregado', modelos_selecionados, train_size, validacao_walk_forward, modo_rapido)
         
         if erro:
             st.error(erro)
