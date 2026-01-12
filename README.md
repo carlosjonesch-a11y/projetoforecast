@@ -1,4 +1,4 @@
-# 📈 Forecast Dashboard
+# 📈 Forecast Dashboard.
 
 Dashboard interativo para previsão de séries temporais com 12 modelos de Machine Learning e estatísticos.
 
